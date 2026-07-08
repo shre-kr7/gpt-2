@@ -1,92 +1,99 @@
-#%%
-import sys
-import os
-sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # avoid cp1252 crashes on Windows consoles
+##THIS WHOLE CODE IS THE COPY OF ANDREJ KARPATHY'S GPT TUTORIAL.
+## IT IS FOR REFERNCE PURPOSES ONLY.
 
+#%%
 with open('input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
-#%%
+
+# %%
 print("length of dataset in characters: ", len(text))
 
-# %%
-print(text[:1000])
-
 
 # %%
+# `set(text)` collects every distinct character that appears anywhere in the dataset.
+# sorted(...) gives us a fixed, reproducible ordering (important: we need the SAME mapping
+# every time we run this, otherwise saved models would become meaningless).
 chars = sorted(list(set(text)))
 
-
+# The vocabulary size is just how many distinct characters exist in our dataset.
 vocab_size = len(chars)
 
-print(''.join(chars))  
+print(''.join(chars))  # all the characters, concatenated, so we can eyeball them
 print(vocab_size)
 
 
 # %%
-
+# stoi = "string to integer": a dict mapping each character to its index in `chars`.
+# itos = "integer to string": the reverse mapping, index back to character.
 stoi = { ch:i for i,ch in enumerate(chars) }
 itos = { i:ch for i,ch in enumerate(chars) }
 
-
+# encode: take a Python string, return a list of integers (one per character).
 encode = lambda s: [stoi[c] for c in s]
 
-
+# decode: take a list of integers, return the string they represent.
 decode = lambda l: ''.join([itos[i] for i in l])
 
-
+# Round-trip sanity check: encoding then decoding should give back the original string.
 print(encode("hii there"))
 print(decode(encode("hii there")))
 
 
 # %%
-import torch
-device = 'cuda' if torch.cuda.is_available() else 'cpu'  # defined early so get_batch can use it below
-print("device:", device)
+import torch  # we use PyTorch: https://pytorch.org
 
+# Encode the ENTIRE dataset (all 1.1M characters) into a single 1-D tensor of integers.
+# dtype=torch.long because these are integer IDs going into an embedding lookup later
+# (PyTorch embeddings require integer index tensors, conventionally int64 / "long").
 data = torch.tensor(encode(text), dtype=torch.long)
 
 print(data.shape, data.dtype)
-print(data[:1000]) 
+print(data[:1000])  # the same first 1000 characters we printed above, now as integer IDs
 
 
 # %%
-n = int(0.9*len(data))       
-train_data = data[:n]        
-val_data = data[n:] 
+# Split the data into a training set and a validation set.
+# We hold out the LAST 10% of the text as validation, training on the first 90%.
+# Why hold out anything at all? A model can always drive train loss to ~0 by memorizing the
+# training text outright. Held-out validation loss is what tells us whether the model has
+# learned generalizable patterns (e.g. "q is usually followed by u", "this looks like a
+# character name and then a colon") rather than just memorizing exact passages.
+n = int(0.9*len(data))       # index marking the 90% cutoff point
+train_data = data[:n]        # first 90% of the tokens
+val_data = data[n:]          # last 10% of the tokens
 
 
 # %%
 block_size = 8
+# Grab the first block_size+1 tokens. We need block_size+1, not block_size, because this one
+# chunk of 9 characters actually encodes 8 separate (input, target) pairs (see below).
 train_data[:block_size+1]
 
-
 # %%
+# A block of length block_size+1 gives us:
+#   x = the first block_size tokens   -> what the model sees
+#   y = the tokens shifted by one     -> what the model should predict at each position
 x = train_data[:block_size]
 y = train_data[1:block_size+1]
 
 for t in range(block_size):
-    context = x[:t+1]   
-    target = y[t]        
+    context = x[:t+1]   # everything up to and including position t
+    target = y[t]        # the character that actually comes next
     print(f"when input is {context} the target: {target}")
 
 
 # %%
-torch.manual_seed(1337)   
-batch_size = 4  
-block_size = 8  
+torch.manual_seed(1337)   # fixes all of torch's randomness below, so results are reproducible
+batch_size = 4   # how many independent sequences will we process in parallel?
+block_size = 8   # what is the maximum context length for predictions?
 
 def get_batch(split):
-    # generate a small batch of data of inputs x and targets y
     data = train_data if split == 'train' else val_data
-
-   
     ix = torch.randint(len(data) - block_size, (batch_size,))
-
-    
     x = torch.stack([data[i:i+block_size] for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)   # move batch to GPU if available -- was missing, silently only worked on CPU
+    x, y = x.to(device), y.to(device)
     return x, y
 
 xb, yb = get_batch('train')
@@ -99,7 +106,7 @@ print(yb)
 
 print('----')
 
-
+# Same idea as the single-example loop above, but now over every example in the batch too.
 for b in range(batch_size):   # batch dimension
     for t in range(block_size):   # time dimension
         context = xb[b, :t+1]
@@ -120,11 +127,18 @@ class BigramLanguageModel(nn.Module):
 
     def __init__(self, vocab_size):
         super().__init__()
-        
+        # nn.Embedding(vocab_size, vocab_size) is a (vocab_size, vocab_size) matrix of
+        # learnable parameters. Given an integer token id, it returns that row of the matrix.
+        # Here we (ab)use it as a direct "current token -> next token logits" lookup table:
+        # each token directly reads off the logits for the next token from a lookup table.
         self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
 
     def forward(self, idx, targets=None):
-        
+        # idx and targets are both (B,T) tensors of integers (B=batch, T=time/sequence length)
+
+        # Look up a row of the table for every single token in idx. Each row is a length
+        # vocab_size vector of raw, unnormalized scores ("logits") for what comes next.
+        # Shape: (B, T) -> (B, T, vocab_size). We name the last dimension C ("channels").
         logits = self.token_embedding_table(idx) # (B,T,C)
 
         if targets is None:
@@ -133,10 +147,16 @@ class BigramLanguageModel(nn.Module):
             loss = None
         else:
             B, T, C = logits.shape
-           
+            # F.cross_entropy expects a 2D input of shape (N, C) and a 1D target of shape (N,),
+            # so we flatten the batch and time dimensions together into one big batch of
+            # individual (token, next_token) prediction problems.
             logits = logits.view(B*T, C)
             targets = targets.view(B*T)
-            
+            # Cross-entropy = -log(probability assigned to the correct next token), averaged
+            # over all B*T predictions. This is THE loss function for next-token prediction:
+            # internally it applies softmax to `logits` and then takes -log of the probability
+            # at the `targets` index. Lower is better; 0 would mean perfect, fully-confident
+            # predictions every time.
             loss = F.cross_entropy(logits, targets)
 
         return logits, loss
@@ -164,13 +184,15 @@ logits, loss = m(xb, yb)
 print(logits.shape)
 print(loss)
 
-
 # %%
 import math
 print("expected loss at initialization: ", math.log(vocab_size))
 print("actual loss:                     ", loss.item())
 
+
 # %%
+# Start the generation from a single token: index 0, which decodes to '\n' (the first
+# character in our sorted vocabulary). Shape (1, 1): batch size 1, sequence length 1.
 idx = torch.zeros((1, 1), dtype=torch.long)
 print(decode(m.generate(idx=idx, max_new_tokens=100)[0].tolist()))
 
@@ -198,8 +220,8 @@ print(loss.item())
 idx = torch.zeros((1, 1), dtype=torch.long)
 print(decode(m.generate(idx=idx, max_new_tokens=500)[0].tolist()))
 
-
 # %%
+# Toy example illustrating how matrix multiplication can be used for a "weighted aggregation".
 torch.manual_seed(42)
 
 # A 3x3 lower-triangular matrix of 1s, then row-normalized so each row sums to 1.
@@ -219,43 +241,49 @@ print('--')
 print('c=')
 print(c)
 
-# %%
 
+# %%
+# Consider the following toy example:
 torch.manual_seed(1337)
 B, T, C = 4, 8, 2   # batch, time, channels — 4 independent sequences, 8 tokens each, 2 features
 x = torch.randn(B, T, C)
 x.shape
 
 # %%
-
+# We want x[b,t] = mean_{i<=t} x[b,i]
 xbow = torch.zeros((B, T, C))   # "bag of words" running average, same shape as x
 for b in range(B):              # for every sequence in the batch...
-    for t in range(T):          
+    for t in range(T):          # ...and every position in that sequence...
         xprev = x[b, :t+1]                # all tokens from the start up to position t (t,C)
         xbow[b, t] = torch.mean(xprev, 0)  # average them along the time dimension
 
 # %%
+# version 2: using matrix multiply for a weighted aggregation
 wei = torch.tril(torch.ones(T, T))           # (T,T) lower-triangular matrix of 1s
 wei = wei / wei.sum(1, keepdim=True)          # normalize each row to sum to 1 (-> row averages)
 
-
+# (T,T) @ (B,T,C): PyTorch broadcasts `wei` across the batch dimension, effectively doing
+# (B, T, T) @ (B, T, C) -> (B, T, C) — the same averaging, applied independently to every
+# sequence in the batch, with no Python-level loop at all.
 xbow2 = wei @ x
 
 # Confirm this matches the slow, explicit version exactly (up to floating point tolerance).
 torch.allclose(xbow, xbow2)
 
 # %%
+# version 3: use Softmax
 tril = torch.tril(torch.ones(T, T))   # the same lower-triangular mask as before
 
 wei = torch.zeros((T, T))             # start from all-zero "affinities" between every pair
-
+# masked_fill replaces every entry where tril==0 (i.e. the upper triangle, "the future")
+# with -inf. After softmax, -inf becomes exactly 0 probability — those positions are
+# completely excluded.
 wei = wei.masked_fill(tril == 0, float('-inf'))
 wei = F.softmax(wei, dim=-1)   # softmax of a row of [0,0,...,0,-inf,-inf,...] is just a
-
+                                 # uniform distribution over the non--inf entries
 
 xbow3 = wei @ x
 torch.allclose(xbow, xbow3)
-
 
 # %%
 torch.manual_seed(1337)
@@ -265,7 +293,9 @@ x = torch.randn(B, T, C)
 # let's see a single Head perform self-attention
 head_size = 16
 
-
+# Three independent linear layers, each projecting from C=32 down to head_size=16.
+# bias=False: standard for these projections in Transformers — we don't need a learnable
+# additive offset here, just a learned linear transformation of the embedding.
 key   = nn.Linear(C, head_size, bias=False)
 query = nn.Linear(C, head_size, bias=False)
 value = nn.Linear(C, head_size, bias=False)
@@ -273,7 +303,9 @@ value = nn.Linear(C, head_size, bias=False)
 k = key(x)     # (B, T, 16) — every token's "what I contain" vector
 q = query(x)   # (B, T, 16) — every token's "what I'm looking for" vector
 
-
+# Dot-product affinity between every pair of positions: for each batch, a (T,T) matrix where
+# entry [i,j] = q[i] . k[j], i.e. "how much does token i's query match token j's key."
+# (B, T, 16) @ (B, 16, T) ---> (B, T, T)  [transpose swaps the last two dims of k]
 wei = q @ k.transpose(-2, -1)
 
 tril = torch.tril(torch.ones(T, T))
@@ -289,10 +321,12 @@ out.shape
 # %%
 k_demo = torch.randn(B, T, head_size)
 q_demo = torch.randn(B, T, head_size)
-wei_demo = q_demo @ k_demo.transpose(-2, -1)   
+wei_demo = q_demo @ k_demo.transpose(-2, -1)   # NOTE: no scaling applied yet
+
 print("var(k):  ", k_demo.var().item())
 print("var(q):  ", q_demo.var().item())
 print("var(wei):", wei_demo.var().item())
+
 
 # %%
 example_logits = torch.tensor([0.1, -0.2, 0.3, -0.2, 0.5])
@@ -300,13 +334,16 @@ example_logits = torch.tensor([0.1, -0.2, 0.3, -0.2, 0.5])
 print("modest-scale logits  -> softmax:", torch.softmax(example_logits, dim=-1))
 print("8x larger logits     -> softmax:", torch.softmax(example_logits * 8, dim=-1))
 
+
 # %%
 wei_scaled = (q_demo @ k_demo.transpose(-2, -1)) * head_size**-0.5   # <- the fix: * 1/sqrt(d)
 
 print("var(wei), unscaled:", wei_demo.var().item())
 print("var(wei), scaled:  ", wei_scaled.var().item())
+
 # %%
-wei = q @ k.transpose(-2, -1) * head_size**-0.5    
+# Re-run the real Head computation from earlier, this time with scaling included.
+wei = q @ k.transpose(-2, -1) * head_size**-0.5    # <- the only change from before
 wei = wei.masked_fill(tril == 0, float('-inf'))
 wei = F.softmax(wei, dim=-1)
 
@@ -314,7 +351,10 @@ out = wei @ v
 out.shape
 
 # %%
-class LayerNorm1d:  
+class LayerNorm1d:  # a from-scratch implementation, to make the mechanics fully explicit
+                     # (used to be called BatchNorm1d in earlier course material — note how
+                     # little code actually changes between the two; only WHICH dimension
+                     # we reduce over)
 
   def __init__(self, dim, eps=1e-5, momentum=0.1):
       self.eps = eps
@@ -322,7 +362,10 @@ class LayerNorm1d:
       self.beta = torch.zeros(dim)    # learned per-feature shift, initialized to 0 (no-op)
 
   def __call__(self, x):
-      
+      # calculate the forward pass
+      # dim=1 is the FEATURE dimension here (x has shape (batch, features)) — this is the
+      # key difference from BatchNorm, which would reduce over dim=0 (the batch dimension)
+      # instead.
       xmean = x.mean(1, keepdim=True)              # mean across features, per example
       xvar = x.var(1, keepdim=True)                 # variance across features, per example
       xhat = (x - xmean) / torch.sqrt(xvar + self.eps)   # normalize to zero mean, unit variance
@@ -340,16 +383,17 @@ x.shape
 
 # %%
 x[:,0].mean(), x[:,0].std()
-
 # %%
 x[0,:].mean(), x[0,:].std()
-
 # %%
-block_size = 256
-n_embd = 384
-n_head = 6
-n_layer = 6
-dropout = 0.2
+block_size = 32   # what is the maximum context length for predictions?
+n_embd = 64       # embedding dimension for every token
+n_head = 4         # number of attention heads per block
+n_layer = 4        # number of Transformer blocks stacked on top of each other
+dropout = 0.0      # dropout probability
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print("device:", device)
 
 # %%
 class Head(nn.Module):
@@ -372,20 +416,26 @@ class Head(nn.Module):
         q = self.query(x)   # (B,T,C)
         # compute attention scores ("affinities") -- scaled dot-product, as derived in Part 7
         wei = q @ k.transpose(-2,-1) * C**-0.5   # (B, T, C) @ (B, C, T) -> (B, T, T)
-        
+        # causal mask: only attend to this position and earlier ones.
+        # self.tril[:T, :T] handles sequences shorter than block_size (e.g. during generation,
+        # before the context has grown to the full block_size).
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
         wei = F.softmax(wei, dim=-1) # (B, T, T)
         wei = self.dropout(wei)
-       
+        # perform the weighted aggregation of the values
         v = self.value(x) # (B,T,C)
         out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
         return out
-    
-#%%
+
+# %%
+# Smoke test: does a single Head run correctly on dummy data of the right shape, and does it
+# produce the shape we expect? We use a 2-example "batch" of 10-token sequences, each token
+# represented by an n_embd-dimensional vector -- exactly the shape that will flow out of the
+# token+position embedding layers later.
 head_size = n_embd // n_head
 dummy_x = torch.randn(2, 10, n_embd)
 test_head = Head(head_size)
-print(test_head(dummy_x).shape)
+print(test_head(dummy_x).shape)   # expect (2, 10, head_size) = (2, 10, 16)
 
 # %%
 class MultiHeadAttention(nn.Module):
@@ -393,21 +443,25 @@ class MultiHeadAttention(nn.Module):
 
     def __init__(self, num_heads, head_size):
         super().__init__()
+        # nn.ModuleList (not a plain Python list!) so PyTorch correctly tracks every Head's
+        # parameters as part of this module (needed for .parameters(), .to(device), etc.)
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)   # mixes information across heads after concat
-        self.proj.GPT_SCALE_INIT = 1   # flagged for scaled residual init, see GPTLanguageModel._init_weights
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        
+        # run every head on the same input, then concatenate their outputs along the last
+        # (feature) dimension: num_heads tensors of shape (B,T,head_size) -> (B,T,n_embd)
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         out = self.dropout(self.proj(out))
         return out
 
 
 # %%
+# Smoke test: n_head heads of head_size each should recombine into n_embd output features.
 test_mha = MultiHeadAttention(n_head, head_size)
-print(test_mha(dummy_x).shape)
+print(test_mha(dummy_x).shape)   # expect (2, 10, n_embd) = (2, 10, 64)
+
 
 # %%
 class FeedFoward(nn.Module):
@@ -415,12 +469,10 @@ class FeedFoward(nn.Module):
 
     def __init__(self, n_embd):
         super().__init__()
-        proj = nn.Linear(4 * n_embd, n_embd)   # project back down: 4*n_embd -> n_embd
-        proj.GPT_SCALE_INIT = 1   # flagged for scaled residual init, see GPTLanguageModel._init_weights
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),   # expand: n_embd -> 4*n_embd
-            nn.GELU(),                        # nonlinearity (GPT-2 uses GELU, not ReLU)
-            proj,
+            nn.ReLU(),                        # nonlinearity
+            nn.Linear(4 * n_embd, n_embd),    # project back down: 4*n_embd -> n_embd
             nn.Dropout(dropout),
         )
 
@@ -429,8 +481,11 @@ class FeedFoward(nn.Module):
 
 
 # %%
+# Smoke test: shape should be unchanged end-to-end (n_embd in, n_embd out), since this module
+# slots into the residual stream alongside attention and must match its shape exactly.
 test_ffwd = FeedFoward(n_embd)
-print(test_ffwd(dummy_x).shape) 
+print(test_ffwd(dummy_x).shape)   # expect (2, 10, n_embd) = (2, 10, 64)
+
 
 # %%
 class Block(nn.Module):
@@ -450,30 +505,41 @@ class Block(nn.Module):
         x = x + self.ffwd(self.ln2(x))    # residual connection around the feed-forward net
         return x
 
-
 # %%
+# Smoke test: stack a couple of Blocks (just like nn.Sequential will do for real, shortly)
+# and confirm the shape is preserved exactly -- this is required for residual connections to
+# even be well-defined (x and f(x) must have the same shape to be added together).
 test_blocks = nn.Sequential(Block(n_embd, n_head), Block(n_embd, n_head))
-print(test_blocks(dummy_x).shape) 
+print(test_blocks(dummy_x).shape)   # expect (2, 10, n_embd) = (2, 10, 64), unchanged
+
 
 # %%
+# A learned table mapping "position index" -> a learned n_embd-dimensional vector.
+# Note this table has block_size rows, NOT vocab_size rows -- it's indexed by WHERE a token
+# is in the sequence (0, 1, 2, ..., block_size-1), not by WHICH token it is.
 position_embedding_table = nn.Embedding(block_size, n_embd)
 
 T_demo = 10
-
+# torch.arange(T_demo) = [0, 1, 2, ..., 9] -- the position indices for a 10-token sequence
 pos_emb_demo = position_embedding_table(torch.arange(T_demo))
-print(pos_emb_demo.shape)
+print(pos_emb_demo.shape)   # (T, n_embd) = (10, 64) -- ONE vector per position, no batch dim
+
+
 # %%
+# token embeddings have shape (B, T, n_embd); position embeddings have shape (T, n_embd).
+# Adding them relies on broadcasting: PyTorch automatically repeats the (T, n_embd) position
+# tensor across the batch dimension, so every sequence in the batch gets the same positional
+# signal added in, while each token's own content embedding stays unique to that token.
 tok_emb_demo = torch.randn(2, T_demo, n_embd)   # pretend token embeddings, batch of 2
 combined = tok_emb_demo + pos_emb_demo
-print(combined.shape)
+print(combined.shape)   # (2, 10, 64) -- shape unchanged, position info now mixed in
 
-# %%
-batch_size = 64
-max_iters = 1000
-eval_interval = 250
-learning_rate = 3e-4
-eval_iters = 50
-
+#%%
+batch_size = 16        # how many independent sequences will we process in parallel?
+max_iters = 5000        # total number of training steps
+eval_interval = 500      # how often (in steps) to report train/val loss
+learning_rate = 1e-3      # AdamW's step size (see Part 5)
+eval_iters = 200   
 # %%
 @torch.no_grad()
 def estimate_loss():
@@ -500,23 +566,6 @@ class GPTLanguageModel(nn.Module):
         self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd)             # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)  # project back up to vocabulary size
-
-        self.token_embedding_table.weight = self.lm_head.weight   # weight tying, as in GPT-2
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        # GPT-2-style init: N(0, 0.02) everywhere, with residual-stream projections
-        # scaled down by 1/sqrt(2 * n_layer) so the residual stream's variance doesn't
-        # grow with depth (each block adds two such projections: attn.proj and ffwd's last linear)
-        if isinstance(module, nn.Linear):
-            std = 0.02
-            if hasattr(module, 'GPT_SCALE_INIT'):
-                std *= (2 * n_layer) ** -0.5
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
@@ -556,6 +605,7 @@ class GPTLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
+
 # %%
 torch.manual_seed(1337)
 
@@ -567,84 +617,60 @@ print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 
 
 # %%
+# create a PyTorch optimizer -- AdamW, exactly as derived and used in Part 5
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-warmup_iters = max(1, max_iters // 50)   # short linear warmup, then cosine decay to 0
+# %%
+for iter in range(max_iters):
 
-def get_lr(it):
-    if it < warmup_iters:
-        return learning_rate * (it + 1) / warmup_iters
-    decay_ratio = min((it - warmup_iters) / max(1, max_iters - warmup_iters), 1.0)
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))   # 1 -> 0
-    return coeff * learning_rate
+    # every once in a while evaluate the loss on train and val sets
+    if iter % eval_interval == 0 or iter == max_iters - 1:
+        losses = estimate_loss()
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+    # sample a batch of data
+    xb, yb = get_batch('train')
+
+    # evaluate the loss
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
 
 # %%
-checkpoint_path = 'gpt_model_best.pt'
-
-if os.path.exists(checkpoint_path):
-    # a trained checkpoint is already sitting on disk -- load it instead of
-    # retraining from scratch every time this script runs
-    print(f"loading existing checkpoint from {checkpoint_path} (delete this file to retrain from scratch)")
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-else:
-    best_val_loss = float('inf')
-
-    for iter in range(max_iters):
-
-        # every once in a while evaluate the loss on train and val sets
-        if iter % eval_interval == 0 or iter == max_iters - 1:
-            losses = estimate_loss()
-            print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-            if losses['val'] < best_val_loss:
-                best_val_loss = losses['val']
-                torch.save(model.state_dict(), checkpoint_path)
-
-        # set this step's learning rate (warmup + cosine decay)
-        lr = get_lr(iter)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-
-        # sample a batch of data
-        xb, yb = get_batch('train')
-
-        # evaluate the loss
-        logits, loss = model(xb, yb)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)   # avoid rare exploding-gradient spikes
-        optimizer.step()
-
-    model.load_state_dict(torch.load(checkpoint_path))   # reload best checkpoint, not just the last step
-
-# %%
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
-
-
-# %%
-# ---- general-purpose runner: encode any prompt, generate, decode -----------------
-def generate_text(prompt="", max_new_tokens=500):
-    ''' feed the trained model a text prompt (or none) and return its completion '''
+def generate_text(prompt="", num_words=50):
+    ''' feed the model a starting prompt and a target word count '''
     model.eval()
-    ids = [stoi[c] for c in prompt if c in stoi]   # silently drop characters unseen in training
+    ids = [stoi[c] for c in prompt if c in stoi]
     if not ids:
-        ids = [0]   # empty/unrecognized prompt -> start from a single seed token, same as above
+        ids = [0]
     context = torch.tensor([ids], dtype=torch.long, device=device)
-    out_ids = m.generate(context, max_new_tokens=max_new_tokens)[0].tolist()
+
+    # generate more characters than we probably need, then trim to exact word count
+    approx_chars_needed = num_words * 6  # ~5 chars/word + space, with buffer
+    out_ids = m.generate(context, max_new_tokens=approx_chars_needed)[0].tolist()
+    full_text = decode(out_ids)
+
+    # trim down to exactly num_words words
+    words = full_text.split()
+    trimmed = ' '.join(words[:num_words])
+
     model.train()
-    return decode(out_ids)
+    return trimmed
 
 
-# %%
+# example usage:
 if __name__ == "__main__":
-    print("\nModel ready. Type a prompt and press Enter to generate text (blank line or 'quit' to exit).\n")
+    print("Type a starting prompt, then how many words to generate.\n")
     while True:
         try:
-            prompt = input("> ")
+            prompt = input("Starting words: ")
+            if prompt.strip().lower() in ("", "quit", "exit"):
+                break
+            num_words = int(input("How many words to generate: "))
         except (EOFError, KeyboardInterrupt):
             break
-        if prompt.strip().lower() in ("", "quit", "exit"):
-            break
-        print(generate_text(prompt, max_new_tokens=300))
+        print()
+        print(generate_text(prompt, num_words))
         print()
 # %%
